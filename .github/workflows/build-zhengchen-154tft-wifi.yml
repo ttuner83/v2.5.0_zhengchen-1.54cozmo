@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Unpack ZIP and build firmware
+    name: Build firmware and publish one package
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.0.2
@@ -28,18 +28,11 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           zips=( *.zip )
-          if [ "${#zips[@]}" -eq 0 ]; then
-            echo 'ERROR: No source ZIP found in repository root.'
-            echo 'Upload the Xiaozhi source archive (.zip) to the repository root and commit it.'
-            exit 1
-          fi
-          if [ "${#zips[@]}" -gt 1 ]; then
-            echo 'ERROR: More than one ZIP was found in repository root:'
+          if [ "${#zips[@]}" -ne 1 ]; then
+            echo "ERROR: Expected exactly one source ZIP in repository root; found ${#zips[@]}"
             printf ' - %s\n' "${zips[@]}"
-            echo 'Keep only the source archive ZIP in the repository root.'
             exit 1
           fi
-          echo "Using archive: ${zips[0]}"
           mkdir -p /tmp/xiaozhi-source
           python - "${zips[0]}" <<'PY'
           import sys, zipfile
@@ -54,17 +47,16 @@ jobs:
               z.extractall(dest)
           print(f'Extracted {archive} into {dest}')
           PY
-          # ZIP may contain a single enclosing folder; locate the actual project root.
           project_root="$(find /tmp/xiaozhi-source -type f -name CMakeLists.txt -print | while read -r f; do d="$(dirname "$f")"; if [ -f "$d/scripts/build.py" ] && [ -f "$d/main/CMakeLists.txt" ]; then echo "$d"; break; fi; done)"
           if [ -z "$project_root" ]; then
-            echo 'ERROR: Could not find project root containing CMakeLists.txt, main/CMakeLists.txt and scripts/build.py.'
+            echo 'ERROR: Could not find Xiaozhi project root (CMakeLists.txt, main/CMakeLists.txt, scripts/build.py).'
             find /tmp/xiaozhi-source -maxdepth 3 -type f | head -100
             exit 1
           fi
           echo "PROJECT_ROOT=$project_root" >> "$GITHUB_ENV"
           echo "Project root: $project_root"
 
-      - name: Verify target board exists
+      - name: Verify target board
         shell: bash
         run: |
           set -euo pipefail
@@ -89,20 +81,41 @@ jobs:
           cd "$PROJECT_ROOT"
           python scripts/build.py zhengchen/1.54tft-wifi --name zhengchen-1.54tft-wifi --language ru-RU --wake-word wn9_hiandy_tts2 --zip
 
-      - name: Verify firmware output
+      - name: Prepare one clearly named firmware package
         shell: bash
         run: |
           set -euo pipefail
-          test -s "$PROJECT_ROOT/build/merged-binary.bin"
-          ls -lh "$PROJECT_ROOT/build/merged-binary.bin"
-          find "$PROJECT_ROOT/releases" -maxdepth 1 -type f -name '*.zip' -print 2>/dev/null || true
+          mkdir -p "$RUNNER_TEMP/firmware-package"
+          mapfile -t release_zips < <(find "$PROJECT_ROOT/releases" -maxdepth 1 -type f -name '*.zip' -print 2>/dev/null | sort)
+          if [ "${#release_zips[@]}" -eq 1 ]; then
+            cp "${release_zips[0]}" "$RUNNER_TEMP/firmware-package/zhengchen-1.54tft-wifi-firmware.zip"
+            echo 'Using the build script release ZIP as the firmware package.'
+          elif [ "${#release_zips[@]}" -gt 1 ]; then
+            echo 'ERROR: More than one release ZIP was generated; refusing to choose an unknown package:'
+            printf ' - %s\n' "${release_zips[@]}"
+            exit 1
+          else
+            merged="$PROJECT_ROOT/build/merged-binary.bin"
+            test -s "$merged" || { echo 'ERROR: No release ZIP and build/merged-binary.bin is missing.'; exit 1; }
+            cp "$merged" "$RUNNER_TEMP/firmware-package/zhengchen-1.54tft-wifi-merged.bin"
+            cat > "$RUNNER_TEMP/firmware-package/README.txt" <<'EOF'
+          Zhengchen 1.54 TFT Wi-Fi — firmware output
 
-      - name: Upload firmware artifacts
+          File: zhengchen-1.54tft-wifi-merged.bin
+          This is the ESP-IDF merged firmware binary produced by the build.
+          Merged binaries are normally flashed from address 0x0, but confirm the
+          board's flashing procedure before writing it to the device.
+          EOF
+            (cd "$RUNNER_TEMP/firmware-package" && zip -q zhengchen-1.54tft-wifi-firmware.zip zhengchen-1.54tft-wifi-merged.bin README.txt)
+            echo 'No release ZIP was generated; packaged the verified merged binary with a README.'
+          fi
+          test -s "$RUNNER_TEMP/firmware-package/zhengchen-1.54tft-wifi-firmware.zip"
+          unzip -l "$RUNNER_TEMP/firmware-package/zhengchen-1.54tft-wifi-firmware.zip"
+
+      - name: Upload one firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: zhengchen-1.54tft-wifi-firmware
-          path: |
-            /tmp/xiaozhi-source/**/build/merged-binary.bin
-            /tmp/xiaozhi-source/**/releases/*.zip
+          path: ${{ runner.temp }}/firmware-package/zhengchen-1.54tft-wifi-firmware.zip
           if-no-files-found: error
           retention-days: 14

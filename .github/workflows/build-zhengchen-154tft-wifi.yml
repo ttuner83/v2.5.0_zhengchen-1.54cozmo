@@ -1,0 +1,108 @@
+name: Build Zhengchen 1.54 TFT Wi-Fi from ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - '*.zip'
+      - '.github/workflows/build-zhengchen-154tft-wifi.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Unpack ZIP and build firmware
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.0.2
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and unpack source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          zips=( *.zip )
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo 'ERROR: No source ZIP found in repository root.'
+            echo 'Upload the Xiaozhi source archive (.zip) to the repository root and commit it.'
+            exit 1
+          fi
+          if [ "${#zips[@]}" -gt 1 ]; then
+            echo 'ERROR: More than one ZIP was found in repository root:'
+            printf ' - %s\n' "${zips[@]}"
+            echo 'Keep only the source archive ZIP in the repository root.'
+            exit 1
+          fi
+          echo "Using archive: ${zips[0]}"
+          mkdir -p /tmp/xiaozhi-source
+          python - "${zips[0]}" <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+          archive = Path(sys.argv[1])
+          dest = Path('/tmp/xiaozhi-source').resolve()
+          with zipfile.ZipFile(archive) as z:
+              for member in z.infolist():
+                  target = (dest / member.filename).resolve()
+                  if target != dest and dest not in target.parents:
+                      raise SystemExit(f'Unsafe path in ZIP: {member.filename}')
+              z.extractall(dest)
+          print(f'Extracted {archive} into {dest}')
+          PY
+          # ZIP may contain a single enclosing folder; locate the actual project root.
+          project_root="$(find /tmp/xiaozhi-source -type f -name CMakeLists.txt -print | while read -r f; do d="$(dirname "$f")"; if [ -f "$d/scripts/build.py" ] && [ -f "$d/main/CMakeLists.txt" ]; then echo "$d"; break; fi; done)"
+          if [ -z "$project_root" ]; then
+            echo 'ERROR: Could not find project root containing CMakeLists.txt, main/CMakeLists.txt and scripts/build.py.'
+            find /tmp/xiaozhi-source -maxdepth 3 -type f | head -100
+            exit 1
+          fi
+          echo "PROJECT_ROOT=$project_root" >> "$GITHUB_ENV"
+          echo "Project root: $project_root"
+
+      - name: Verify target board exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$PROJECT_ROOT/scripts/build.py"
+          test -s "$PROJECT_ROOT/main/boards/zhengchen/1.54tft-wifi/config.json"
+          python - "$PROJECT_ROOT/main/boards/zhengchen/1.54tft-wifi/config.json" <<'PY'
+          import json, sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          cfg = json.loads(p.read_text(encoding='utf-8'))
+          assert cfg.get('target') == 'esp32s3', f"Unexpected target: {cfg.get('target')}"
+          assert any(b.get('name') == 'zhengchen-1.54tft-wifi' for b in cfg.get('builds', [])), 'Expected build variant is missing'
+          print('Board config verified:', p)
+          PY
+
+      - name: Build firmware
+        shell: bash
+        working-directory: /tmp
+        run: |
+          set -euo pipefail
+          source "$IDF_PATH/export.sh"
+          cd "$PROJECT_ROOT"
+          python scripts/build.py zhengchen/1.54tft-wifi --name zhengchen-1.54tft-wifi --language ru-RU --wake-word wn9_hiandy_tts2 --zip
+
+      - name: Verify firmware output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$PROJECT_ROOT/build/merged-binary.bin"
+          ls -lh "$PROJECT_ROOT/build/merged-binary.bin"
+          find "$PROJECT_ROOT/releases" -maxdepth 1 -type f -name '*.zip' -print 2>/dev/null || true
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zhengchen-1.54tft-wifi-firmware
+          path: |
+            /tmp/xiaozhi-source/**/build/merged-binary.bin
+            /tmp/xiaozhi-source/**/releases/*.zip
+          if-no-files-found: error
+          retention-days: 14

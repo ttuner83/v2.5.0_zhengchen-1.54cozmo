@@ -2,18 +2,13 @@ name: Build Zhengchen 1.54 TFT Wi-Fi from ZIP
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main, master]
-    paths:
-      - '*.zip'
-      - '.github/workflows/build-zhengchen-154tft-wifi.yml'
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build firmware and publish one package
+    name: Build firmware
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.0.2
@@ -27,14 +22,20 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          zips=( *.zip )
-          if [ "${#zips[@]}" -ne 1 ]; then
-            echo "ERROR: Expected exactly one source ZIP in repository root; found ${#zips[@]}"
-            printf ' - %s\n' "${zips[@]}"
-            exit 1
+          preferred='zhengchen-1.54tft-wifi-v100-square-buttons-deps.zip'
+          if [ -f "$preferred" ]; then
+            source_zip="$preferred"
+          else
+            zips=( *.zip )
+            if [ "${#zips[@]}" -ne 1 ]; then
+              echo "ERROR: Put the source ZIP in the repository root, or keep only one ZIP there. Found ${#zips[@]} ZIP files."
+              printf ' - %s\n' "${zips[@]}"
+              exit 1
+            fi
+            source_zip="${zips[0]}"
           fi
           mkdir -p /tmp/xiaozhi-source
-          python - "${zips[0]}" <<'PY'
+          python - "$source_zip" <<'PY'
           import sys, zipfile
           from pathlib import Path
           archive = Path(sys.argv[1])
@@ -81,7 +82,7 @@ jobs:
           cd "$PROJECT_ROOT"
           python scripts/build.py zhengchen/1.54tft-wifi --name zhengchen-1.54tft-wifi --language ru-RU --wake-word wn9_hiandy_tts2 --zip
 
-      - name: Prepare one clearly named firmware package
+      - name: Prepare firmware artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -89,30 +90,19 @@ jobs:
           mapfile -t release_zips < <(find "$PROJECT_ROOT/releases" -maxdepth 1 -type f -name '*.zip' -print 2>/dev/null | sort)
           if [ "${#release_zips[@]}" -eq 1 ]; then
             cp "${release_zips[0]}" "$RUNNER_TEMP/firmware-package/zhengchen-1.54tft-wifi-firmware.zip"
-            echo 'Using the build script release ZIP as the firmware package.'
           elif [ "${#release_zips[@]}" -gt 1 ]; then
-            echo 'ERROR: More than one release ZIP was generated; refusing to choose an unknown package:'
+            echo 'ERROR: More than one release ZIP was generated; refusing to choose automatically.'
             printf ' - %s\n' "${release_zips[@]}"
             exit 1
           else
             merged="$PROJECT_ROOT/build/merged-binary.bin"
             test -s "$merged" || { echo 'ERROR: No release ZIP and build/merged-binary.bin is missing.'; exit 1; }
             cp "$merged" "$RUNNER_TEMP/firmware-package/zhengchen-1.54tft-wifi-merged.bin"
-            cat > "$RUNNER_TEMP/firmware-package/README.txt" <<'EOF'
-          Zhengchen 1.54 TFT Wi-Fi — firmware output
-
-          File: zhengchen-1.54tft-wifi-merged.bin
-          This is the ESP-IDF merged firmware binary produced by the build.
-          Merged binaries are normally flashed from address 0x0, but confirm the
-          board's flashing procedure before writing it to the device.
-          EOF
-            (cd "$RUNNER_TEMP/firmware-package" && zip -q zhengchen-1.54tft-wifi-firmware.zip zhengchen-1.54tft-wifi-merged.bin README.txt)
-            echo 'No release ZIP was generated; packaged the verified merged binary with a README.'
+            (cd "$RUNNER_TEMP/firmware-package" && zip -q zhengchen-1.54tft-wifi-firmware.zip zhengchen-1.54tft-wifi-merged.bin)
           fi
           test -s "$RUNNER_TEMP/firmware-package/zhengchen-1.54tft-wifi-firmware.zip"
-          unzip -l "$RUNNER_TEMP/firmware-package/zhengchen-1.54tft-wifi-firmware.zip"
 
-      - name: Upload one firmware artifact
+      - name: Upload build result as downloadable Actions artifact
         uses: actions/upload-artifact@v4
         with:
           name: zhengchen-1.54tft-wifi-firmware
